@@ -109,6 +109,8 @@ def parse_args():
                         help="Индекс камеры (auto если не указан)")
     parser.add_argument("--imgsz", type=int, default=640,
                         help="Размер входа YOLO")
+    parser.add_argument("--model3d", type=str, default=None,
+                        help="Путь к 3D-модели (.obj) для AR-рендеринга")
     parser.add_argument("--export", action="store_true",
                         help="Экспорт метрик в CSV при выходе")
     parser.add_argument("--no-display", action="store_true",
@@ -149,6 +151,8 @@ def main():
     
     # 5. AR-рендерер
     ar_renderer = ARCubeRenderer(stereo.get_projection_matrix())
+    if args.model3d:
+        ar_renderer.load_model(args.model3d)
     ar_enabled = False
     
     method = args.method
@@ -162,7 +166,7 @@ def main():
     print(f"   Q — выход")
     print(f"   M — переключить метод ({method})")
     print(f"   V — переключить вид ({view_names[view_mode]})")
-    print(f"   A — AR куб (вкл/выкл)")
+    print(f"   A — AR {'model' if args.model3d else 'cube'} (вкл/выкл)")
     print(f"   S — скриншот")
     print(f"   E — экспорт CSV")
     print(f"   P — пауза\n")
