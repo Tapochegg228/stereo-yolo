@@ -23,10 +23,21 @@ class ARCubeRenderer:
     для корректной перспективной проекции.
     """
     
-    # Эталонные расстояния паттерна (мм) — равнобедренный треугольник
-    PATTERN_BASE = 51.0    # основание (уникальная сторона)
-    PATTERN_SIDE = 65.0    # равные стороны
-    PATTERN_TOLERANCE = 0.35  # допуск 35% на погрешность глубины
+    # Эталонные расстояния паттерна (мм) — разносторонний треугольник
+    # Все стороны разные → каждый маркер однозначно идентифицируется
+    PATTERN_SHORT = 47.5   # основание (самая короткая сторона)
+    PATTERN_MEDIUM = 65.0  # средняя сторона (от apex)
+    PATTERN_LONG = 75.0    # длинная сторона (от apex)
+    PATTERN_TOLERANCE = 0.35  # допуск 35%
+    
+    # 3D-координаты маркеров в локальной системе модели (мм, из Blender)
+    # Применяем ту же Rx-коррекцию что и для модели (+90° вокруг X)
+    # Blender: (X, Y, Z) → после Rx: (X, -Z, Y)
+    MODEL_MARKERS_BLENDER = np.array([
+        [ 0.0,  0.0, 0.0],   # origin
+        [47.0,  7.0, 0.0],   # base1 (47.5мм от origin)
+        [ 0.0, 65.0, 0.0],   # base2 (65мм от origin, +Y)
+    ], dtype=np.float64)
     
     def __init__(self, P_l):
         """
@@ -64,6 +75,20 @@ class ARCubeRenderer:
         self.model = None
         # Направление света для Lambertian shading (из камеры)
         self.light_dir = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        
+        # Blender → OBJ export transform (Forward:-Z, Up:Y)
+        # (x,y,z)_blender → (x, z, -y)_obj
+        B2O = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=np.float64)
+        self.model_markers = (B2O @ self.MODEL_MARKERS_BLENDER.T).T
+        
+        # Temporal smoothing (EMA)
+        self._smooth_R = None    # сглаженная матрица поворота
+        self._smooth_t = None    # сглаженный вектор сдвига
+        self._ema_alpha = 0.3    # 0.0 = макс сглаживание, 1.0 = без
+        
+        # solvePnP: предыдущий кадр как начальное приближение
+        self._prev_rvec = None
+        self._prev_tvec = None
     
     def load_model(self, path):
         """Загружает 3D-модель из файла (без нормализации — масштаб в мм)."""
@@ -94,16 +119,19 @@ class ARCubeRenderer:
     def identify_markers(self, points_3d):
         """
         Геометрическая идентификация маркеров по паттерну
-        равнобедренного треугольника (51мм основание, 65мм стороны).
+        разностороннего треугольника (47.5, 65, 75 мм).
         
-        Определяет apex (вершина между равными сторонами)
-        и два базовых маркера.
+        Все стороны разные → однозначная идентификация:
+        - origin: маркер НЕ на самой длинной стороне (75мм),
+                  т.е. между сторонами 47.5мм и 65мм
+        - base1: маркер на конце короткой ноги (47.5мм от origin)
+        - base2: маркер на конце средней ноги (65мм от origin)
         
         Args:
             points_3d: list of 3 np.array([X, Y, Z])
         
         Returns:
-            (apex, base1, base2) — идентифицированные точки, или None
+            (origin, base1, base2, indices) — точки и их индексы [i_origin, i_b1, i_b2], или None
         """
         if len(points_3d) != 3:
             return None
@@ -119,43 +147,52 @@ class ARCubeRenderer:
         edges = [(d01, 0, 1), (d02, 0, 2), (d12, 1, 2)]
         edges.sort(key=lambda x: x[0])
         
-        shortest = edges[0]  # основание (51мм)
+        longest = edges[2]  # самая длинная сторона (~75мм)
         
-        # Apex = маркер, которого НЕТ на основании
-        base_markers = {shortest[1], shortest[2]}
+        # Origin = маркер, которого НЕТ на самой длинной стороне
+        long_markers = {longest[1], longest[2]}
         all_markers = {0, 1, 2}
-        apex_idx = (all_markers - base_markers).pop()
-        base1_idx = shortest[1]
-        base2_idx = shortest[2]
+        origin_idx = (all_markers - long_markers).pop()
         
-        return p[apex_idx], p[base1_idx], p[base2_idx]
+        # Различаем два других маркера по расстоянию от origin
+        other = list(long_markers)
+        d0 = np.linalg.norm(p[origin_idx] - p[other[0]])
+        d1 = np.linalg.norm(p[origin_idx] - p[other[1]])
+        
+        if d0 <= d1:
+            base1_idx = other[0]  # 47.5мм (короткая нога)
+            base2_idx = other[1]  # 65мм (средняя нога)
+        else:
+            base1_idx = other[1]
+            base2_idx = other[0]
+        
+        return p[origin_idx], p[base1_idx], p[base2_idx], [origin_idx, base1_idx, base2_idx]
     
-    def build_coordinate_frame(self, apex, base1, base2):
+    def build_coordinate_frame(self, origin_pt, base1, base2):
         """
-        Строит систему координат по равнобедренному треугольнику.
+        Строит систему координат по разностороннему треугольнику.
         
-        −Y = направление от apex к base1 (одна из сторон 65мм).
-        На оси Y лежат 2 маркера: apex (origin) и base1.
+        +Y = направление от origin к base2 (65мм, маркер между 75 и 65).
+        На оси Y лежат 2 маркера: origin и base2.
         
-        Origin = apex
-        Y = apex → base1 (направлена в −Y)
+        Origin = origin_pt
+        Y = origin → base2 (+Y)
         Z = нормаль к плоскости (к камере)
         X = дополняет до правой системы
         
         Returns:
             (origin, x_axis, y_axis, z_axis, size) или None
         """
-        # −Y = направление от apex к base1
-        v_leg = base1 - apex
-        len_leg = np.linalg.norm(v_leg)
-        if len_leg < 1e-6:
+        # +Y = направление от origin к base2 (65мм)
+        v_y = base2 - origin_pt
+        len_y = np.linalg.norm(v_y)
+        if len_y < 1e-6:
             return None
-        neg_y_axis = v_leg / len_leg
-        y_axis = -neg_y_axis
+        y_axis = v_y / len_y
         
         # Z-ось (нормаль плоскости)
-        v_other = base2 - apex
-        normal = np.cross(v_leg, v_other)
+        v_other = base1 - origin_pt
+        normal = np.cross(v_other, v_y)
         len_normal = np.linalg.norm(normal)
         if len_normal < 1e-6:
             return None
@@ -169,8 +206,8 @@ class ARCubeRenderer:
         x_axis = np.cross(y_axis, z_axis)
         x_axis = x_axis / np.linalg.norm(x_axis)
         
-        origin = apex.copy()
-        size = (np.linalg.norm(base1 - apex) + np.linalg.norm(base2 - apex)) / 2.0
+        origin = origin_pt.copy()
+        size = (np.linalg.norm(base1 - origin_pt) + np.linalg.norm(base2 - origin_pt)) / 2.0
         
         return origin, x_axis, y_axis, z_axis, size
     
@@ -194,12 +231,116 @@ class ARCubeRenderer:
         
         return np.array([v0, v1, v2, v3, v4, v5, v6, v7], dtype=np.float64)
     
-    def transform_model_vertices(self, origin, x_axis, y_axis, z_axis, size):
+    def kabsch_align(self, measured_pts):
         """
-        Трансформирует вершины модели в координаты камеры.
+        SVD alignment (Kabsch алгоритм).
         
-        Модель НЕ нормализована — размеры в мм.
-        Применяем коррекцию ориентации + поворот (R) + сдвиг (origin).
+        Находит оптимальные R и t, минимизирующие расстояние
+        между модельными и измеренными позициями маркеров.
+        
+        Args:
+            measured_pts: np.array (3, 3) — измеренные 3D-позиции
+                          [origin, base1, base2] в координатах камеры
+        
+        Returns:
+            (R, t) — матрица поворота (3,3) и вектор сдвига (3,)
+        """
+        model_pts = self.model_markers  # (3, 3) с Rx-коррекцией
+        
+        # 1. Центрируем оба набора
+        centroid_model = model_pts.mean(axis=0)
+        centroid_measured = measured_pts.mean(axis=0)
+        
+        P = model_pts - centroid_model
+        Q = measured_pts - centroid_measured
+        
+        # 2. Ковариационная матрица
+        H = P.T @ Q  # (3, 3)
+        
+        # 3. SVD
+        U, S, Vt = np.linalg.svd(H)
+        
+        # 4. Оптимальный поворот (с коррекцией отражения)
+        d = np.linalg.det(Vt.T @ U.T)
+        sign_matrix = np.diag([1, 1, np.sign(d)])
+        R = Vt.T @ sign_matrix @ U.T
+        
+        # 5. Оптимальный сдвиг
+        t = centroid_measured - R @ centroid_model
+        
+        # Temporal smoothing (EMA)
+        if self._smooth_R is None:
+            self._smooth_R = R.copy()
+            self._smooth_t = t.copy()
+        else:
+            alpha = self._ema_alpha
+            self._smooth_t = alpha * t + (1 - alpha) * self._smooth_t
+            # Для сглаживания поворота: интерполяция через ось-угол
+            self._smooth_R = self._slerp_matrix(self._smooth_R, R, alpha)
+        
+        return self._smooth_R, self._smooth_t
+    
+    def kabsch_align_raw(self, measured_pts):
+        """
+        SVD alignment без сглаживания — сырой результат для solvePnP.
+        """
+        model_pts = self.model_markers
+        
+        centroid_model = model_pts.mean(axis=0)
+        centroid_measured = measured_pts.mean(axis=0)
+        
+        P = model_pts - centroid_model
+        Q = measured_pts - centroid_measured
+        
+        H = P.T @ Q
+        U, S, Vt = np.linalg.svd(H)
+        
+        d = np.linalg.det(Vt.T @ U.T)
+        sign_matrix = np.diag([1, 1, np.sign(d)])
+        R = Vt.T @ sign_matrix @ U.T
+        t = centroid_measured - R @ centroid_model
+        
+        return R, t
+    
+    def _slerp_matrix(self, R_prev, R_new, alpha):
+        """
+        Интерполяция между двумя матрицами поворота.
+        Корректнее чем покомпонентное усреднение.
+        """
+        # Относительный поворот: R_diff = R_new @ R_prev^T
+        R_diff = R_new @ R_prev.T
+        
+        # Ось-угол из R_diff
+        angle = np.arccos(np.clip((np.trace(R_diff) - 1) / 2, -1, 1))
+        
+        if angle < 1e-6:
+            return R_new  # почти одинаковые
+        
+        # Интерполируем угол
+        frac_angle = alpha * angle
+        
+        # Ось вращения
+        axis = np.array([
+            R_diff[2, 1] - R_diff[1, 2],
+            R_diff[0, 2] - R_diff[2, 0],
+            R_diff[1, 0] - R_diff[0, 1]
+        ])
+        axis_len = np.linalg.norm(axis)
+        if axis_len < 1e-10:
+            return R_new
+        axis = axis / axis_len
+        
+        # Матрица поворота на frac_angle вокруг axis
+        K = np.array([[0, -axis[2], axis[1]],
+                      [axis[2], 0, -axis[0]],
+                      [-axis[1], axis[0], 0]])
+        R_frac = np.eye(3) + np.sin(frac_angle) * K + (1 - np.cos(frac_angle)) * K @ K
+        
+        return R_frac @ R_prev
+    
+    def transform_model_vertices_svd(self, R, t):
+        """
+        Трансформирует вершины модели используя R и t из SVD alignment.
         
         Returns:
             np.array (N, 3) — вершины в координатах камеры
@@ -207,17 +348,27 @@ class ARCubeRenderer:
         if self.model is None:
             return None
         
-        # Коррекция ориентации: поворот −90° вокруг X
-        # (модель из Blender: Y-up, программа: Z-up)
+        # Вершины в Blender-координатах (без коррекции — консистентно с model_markers)
+        corrected = self.model.vertices
+        
+        # SVD-оптимальный поворот + сдвиг
+        transformed = (R @ corrected.T).T + t
+        
+        return transformed
+    
+    def transform_model_vertices(self, origin, x_axis, y_axis, z_axis, size):
+        """
+        Трансформирует вершины модели в координаты камеры (legacy, для куба).
+        """
+        if self.model is None:
+            return None
+        
         Rx = np.array([[1,  0,  0],
                        [0,  0, -1],
                        [0,  1,  0]], dtype=np.float64)
         corrected = (Rx @ self.model.vertices.T).T
         
-        # Матрица поворота 3x3: столбцы = оси маркеров
         R = np.column_stack([x_axis, y_axis, z_axis])
-        
-        # Поворот + сдвиг (без масштабирования — модель уже в мм)
         transformed = (R @ corrected.T).T + origin
         
         return transformed
@@ -394,61 +545,104 @@ class ARCubeRenderer:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
             return False
         
-        # Конвертируем все маркеры в 3D
+        # Конвертируем все маркеры в 3D (для идентификации)
         points_3d = [self.pixel_depth_to_3d(m[0], m[1], m[2]) for m in valid[:3]]
         
         # Геометрическая идентификация маркеров
         identified = self.identify_markers(points_3d)
         if identified is None:
-            # Фолбэк: старый метод (сортировка по X)
-            valid.sort(key=lambda m: m[0])
-            p0 = self.pixel_depth_to_3d(valid[0][0], valid[0][1], valid[0][2])
-            p1 = self.pixel_depth_to_3d(valid[1][0], valid[1][1], valid[1][2])
-            p2 = self.pixel_depth_to_3d(valid[2][0], valid[2][1], valid[2][2])
-        else:
-            p0, p1, p2 = identified
-        
-        # Строим систему координат
-        frame_result = self.build_coordinate_frame(p0, p1, p2)
-        if frame_result is None:
             return False
         
-        origin, x_axis, y_axis, z_axis, size = frame_result
+        p0, p1, p2, indices = identified
         
-        # === Рисуем модель или куб ===
+        # === Рисуем модель (Kabsch + solvePnP) или куб (legacy) ===
         if self.model is not None:
-            # Трансформируем вершины модели
-            verts_3d = self.transform_model_vertices(
-                origin, x_axis, y_axis, z_axis, size
+            # 1. Kabsch: грубая но робастная оценка позы из стерео 3D
+            measured = np.array([p0, p1, p2])
+            R_kabsch, t_kabsch = self.kabsch_align_raw(measured)
+            
+            # 2. Конвертируем в rvec/tvec для solvePnP
+            rvec_init, _ = cv2.Rodrigues(R_kabsch)
+            tvec_init = t_kabsch.reshape(3, 1)
+            
+            # 3. solvePnP уточняет ротацию через точные 2D-пиксели
+            image_pts = np.array([
+                [valid[indices[0]][0], valid[indices[0]][1]],
+                [valid[indices[1]][0], valid[indices[1]][1]],
+                [valid[indices[2]][0], valid[indices[2]][1]],
+            ], dtype=np.float64)
+            
+            success, rvec, tvec = cv2.solvePnP(
+                self.model_markers,
+                image_pts,
+                self.camera_matrix,
+                self.dist_coeffs,
+                rvec=rvec_init,
+                tvec=tvec_init,
+                useExtrinsicGuess=True,
+                flags=cv2.SOLVEPNP_ITERATIVE
             )
-            if verts_3d is None:
+            if not success:
                 return False
+            
+            R_raw, _ = cv2.Rodrigues(rvec)
+            t_raw = tvec.flatten()
+            
+            # 4. Temporal smoothing (EMA)
+            if self._smooth_R is None:
+                self._smooth_R = R_raw.copy()
+                self._smooth_t = t_raw.copy()
+            else:
+                alpha = self._ema_alpha
+                self._smooth_t = alpha * t_raw + (1 - alpha) * self._smooth_t
+                self._smooth_R = self._slerp_matrix(self._smooth_R, R_raw, alpha)
+            
+            R, t = self._smooth_R, self._smooth_t
+            
+            # 5. Трансформируем вершины модели
+            verts_3d = (R @ self.model.vertices.T).T + t
             
             verts_2d = self.project_3d_to_2d(verts_3d)
             if verts_2d is None:
                 return False
             
             self.draw_model(frame, verts_3d, verts_2d)
-            label = f"AR MODEL | {self.model.num_faces}f | size={size:.0f}mm"
+            label = f"AR MODEL (PnP) | {self.model.num_faces}f"
+            
+            # Оси из solvePnP
+            origin_pt = t
+            axis_length = 30.0
+            axes_3d = np.array([
+                origin_pt,
+                origin_pt + R @ np.array([axis_length, 0, 0]),
+                origin_pt + R @ np.array([0, axis_length, 0]),
+                origin_pt + R @ np.array([0, 0, axis_length]),
+            ])
         else:
-            # Куб
+            # Куб (legacy) — используем старый метод
+            frame_result = self.build_coordinate_frame(p0, p1, p2)
+            if frame_result is None:
+                return False
+            origin_pt, x_axis, y_axis, z_axis, size = frame_result
+            
             vertices_3d = self.generate_cube_vertices(
-                origin, x_axis, y_axis, z_axis, size
+                origin_pt, x_axis, y_axis, z_axis, size
             )
             vertices_2d = self.project_3d_to_2d(vertices_3d)
             if vertices_2d is None:
                 return False
             self.draw_cube(frame, vertices_2d)
             label = f"AR CUBE | size={size:.0f}mm"
+            
+            axis_length = size * 0.6
+            axes_3d = np.array([
+                origin_pt,
+                origin_pt + x_axis * axis_length,
+                origin_pt + y_axis * axis_length,
+                origin_pt + z_axis * axis_length
+            ])
         
         # Рисуем оси координат
-        axis_length = size * 0.6
-        axes_3d = np.array([
-            origin,
-            origin + x_axis * axis_length,
-            origin + y_axis * axis_length,
-            origin + z_axis * axis_length
-        ])
         axes_2d = self.project_3d_to_2d(axes_3d)
         if axes_2d is not None:
             self.draw_axes(frame, axes_2d[0], axes_2d[1], axes_2d[2], axes_2d[3])
