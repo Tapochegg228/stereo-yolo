@@ -28,14 +28,10 @@ def main():
     print("=" * 55)
     
     # Инициализация
-    cap, index = find_stereo_camera()
+    cap, index, resolution = find_stereo_camera()
     if cap is None:
         print("❌ Камера не найдена!")
         sys.exit(1)
-    
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     mid = width // 2

@@ -43,7 +43,7 @@ def capture_calibration_images():
     """
     from camera_test import find_stereo_camera
     
-    cap, index = find_stereo_camera()
+    cap, index, resolution = find_stereo_camera()
     if cap is None:
         print("❌ Стереокамера не найдена!")
         sys.exit(1)
@@ -237,8 +237,20 @@ def calibrate_stereo():
     focal_length_px = P_l[0, 0]
     
     # --- Сохранение ---
-    print(f"\n💾 Сохранение в {RESULTS_FILE}...")
-    np.savez(RESULTS_FILE,
+    # Спрашиваем имя для файла калибровки
+    print(f"\n💾 Сохранение калибровки...")
+    print(f"   Введите описание камеры (например: hd_85base, fhd_60base)")
+    try:
+        cam_name = input("   Имя: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        cam_name = ""
+    
+    if cam_name:
+        save_file = os.path.join(CALIBRATION_DIR, f"stereo_calibration_{cam_name}.npz")
+    else:
+        save_file = os.path.join(CALIBRATION_DIR, "stereo_calibration_unnamed.npz")
+    
+    np.savez(save_file,
         K_l=K_l, D_l=D_l,
         K_r=K_r, D_r=D_r,
         R=R, T=T,
@@ -255,13 +267,24 @@ def calibrate_stereo():
         stereo_rms_error=ret_stereo
     )
     
+    # Обновляем симлинк stereo_calibration.npz → новый файл
+    link_path = os.path.join(CALIBRATION_DIR, "stereo_calibration.npz")
+    if os.path.islink(link_path):
+        os.remove(link_path)
+    elif os.path.exists(link_path):
+        # Если это обычный файл — переименуем для сохранности
+        os.rename(link_path, link_path + ".backup")
+    os.symlink(os.path.basename(save_file), link_path)
+    
     print(f"\n✅ Калибровка завершена!")
+    print(f"   Файл: {save_file}")
+    print(f"   Симлинк: stereo_calibration.npz → {os.path.basename(save_file)}")
     print(f"   Stereo RMS: {ret_stereo:.4f} px (хорошо: < 0.5)")
     print(f"   Focal length: {focal_length_px:.2f} px")
     print(f"   Baseline: {baseline_mm:.2f} мм")
     print(f"   Image size: {image_size}")
     
-    return RESULTS_FILE
+    return save_file
 
 
 def verify_calibration():
@@ -280,7 +303,7 @@ def verify_calibration():
     print(f"   Baseline: {data['baseline_mm']:.2f} мм")
     
     from camera_test import find_stereo_camera
-    cap, _ = find_stereo_camera()
+    cap, _, _ = find_stereo_camera()
     if cap is None:
         print("❌ Камера не найдена!")
         sys.exit(1)

@@ -84,7 +84,7 @@ class ARCubeRenderer:
         # Temporal smoothing (EMA)
         self._smooth_R = None    # сглаженная матрица поворота
         self._smooth_t = None    # сглаженный вектор сдвига
-        self._ema_alpha = 0.3    # 0.0 = макс сглаживание, 1.0 = без
+        self._ema_alpha = 1.0    # 1.0 = без сглаживания (0.3 было раньше)
         
         # solvePnP: предыдущий кадр как начальное приближение
         self._prev_rvec = None

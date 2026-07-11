@@ -46,17 +46,12 @@ class ThreadedCameraCapture:
         """Поиск и инициализация стереокамеры."""
         from camera_test import find_stereo_camera
         
-        cap, found_index = find_stereo_camera(preferred_index=index)
+        cap, found_index, resolution = find_stereo_camera(preferred_index=index)
         
         if cap is None:
             raise RuntimeError("❌ Стереокамера не найдена!")
         
         self.cap = cap
-        
-        # Настройки
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         
         width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.mid = width // 2
@@ -271,8 +266,29 @@ def main():
                     print(f"🎲 AR куб: {'ON' if ar_enabled else 'OFF'}")
                 elif key == ord('s'):
                     ts = int(time.time())
-                    cv2.imwrite(f"screenshot_{ts}.jpg", display)
-                    print(f"📸 Скриншот: screenshot_{ts}.jpg")
+                    
+                    # 1. Фотография 1: Чистый кадр (левый ректифицированный)
+                    raw_filename = f"screenshot_{ts}_1_raw.jpg"
+                    cv2.imwrite(raw_filename, left_rect)
+                    
+                    # 2. Фотография 2: Только рамки ROI (детекция YOLO)
+                    roi_display = left_rect.copy()
+                    for det in detections:
+                        x1, y1, x2, y2 = [int(v) for v in det["bbox"]]
+                        cv2.rectangle(roi_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(roi_display, f"ROI: {det['class_name']}", (x1, y1 - 5),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+                    roi_filename = f"screenshot_{ts}_2_roi.jpg"
+                    cv2.imwrite(roi_filename, roi_display)
+                    
+                    # 3. Фотография 3: Итоговый кадр (глубина, координаты, метрики)
+                    final_filename = f"screenshot_{ts}_3_final.jpg"
+                    cv2.imwrite(final_filename, display)
+                    
+                    print(f"📸 Сохранено 3 кадра для отчёта:")
+                    print(f"   1. Чистый кадр: {raw_filename}")
+                    print(f"   2. Выделенные ROI: {roi_filename}")
+                    print(f"   3. Координаты и глубина: {final_filename}")
                 elif key == ord('e'):
                     metrics.export_csv()
                 elif key == ord('p'):

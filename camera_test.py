@@ -12,30 +12,72 @@ import time
 import numpy as np
 
 
-def find_stereo_camera(preferred_index=None):
+# Доступные разрешения стереокамер (side-by-side)
+STEREO_RESOLUTIONS = {
+    "hd":  (2560, 720),   # 1280×720 на глаз
+    "fhd": (3840, 1080),  # 1920×1080 на глаз
+}
+
+
+def ask_resolution():
+    """
+    Интерактивный выбор разрешения стереокамеры.
+    
+    Returns:
+        (width, height) — side-by-side разрешение
+    """
+    print("\n📺 Выберите разрешение стереокамеры:")
+    print("   [1] HD   (1280×720  на глаз, side-by-side 2560×720)")
+    print("   [2] FHD  (1920×1080 на глаз, side-by-side 3840×1080)")
+    
+    while True:
+        try:
+            choice = input("   Ваш выбор (1/2): ").strip()
+            if choice == "1":
+                res = STEREO_RESOLUTIONS["hd"]
+                print(f"   ✅ Выбрано: HD ({res[0]}×{res[1]})")
+                return res
+            elif choice == "2":
+                res = STEREO_RESOLUTIONS["fhd"]
+                print(f"   ✅ Выбрано: FHD ({res[0]}×{res[1]})")
+                return res
+            else:
+                print("   ⚠️  Введите 1 или 2")
+        except (EOFError, KeyboardInterrupt):
+            print("\n   Используется HD по умолчанию")
+            return STEREO_RESOLUTIONS["hd"]
+
+
+def find_stereo_camera(preferred_index=None, resolution=None):
     """
     Поиск подключённой стереокамеры среди доступных устройств.
     
     Args:
         preferred_index: Если указан, пробуем этот индекс первым
+        resolution: (width, height) side-by-side разрешение.
+                    Если None — спрашивает интерактивно.
     
     Returns:
-        (cap, index) или (None, -1)
+        (cap, index, resolution) или (None, -1, None)
     """
-    print("🔍 Поиск стереокамеры...")
+    if resolution is None:
+        resolution = ask_resolution()
+    
+    res_w, res_h = resolution
+    print(f"\n🔍 Поиск стереокамеры ({res_w}×{res_h})...")
     
     # Если указан конкретный индекс — пробуем его
     if preferred_index is not None:
         cap = cv2.VideoCapture(preferred_index)
         if cap.isOpened():
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, res_w)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
             ret, frame = cap.read()
             if ret and frame is not None:
                 h, w = frame.shape[:2]
                 print(f"  ✅ Камера #{preferred_index}: {w}×{h}")
-                return cap, preferred_index
+                return cap, preferred_index, resolution
         if cap.isOpened():
             cap.release()
     
@@ -53,8 +95,8 @@ def find_stereo_camera(preferred_index=None):
         
         # Пробуем установить MJPG и разрешение стерео
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, res_w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
         
         ret, frame = cap.read()
         if ret and frame is not None:
@@ -78,7 +120,7 @@ def find_stereo_camera(preferred_index=None):
             if cam["index"] != stereo_candidate["index"]:
                 cam["cap"].release()
         print(f"\n  ✅ Найдена стереокамера на индексе {stereo_candidate['index']}")
-        return stereo_candidate["cap"], stereo_candidate["index"]
+        return stereo_candidate["cap"], stereo_candidate["index"], resolution
     
     # Стерео не найдена — предлагаем выбрать вручную
     if cameras:
@@ -99,7 +141,7 @@ def find_stereo_camera(preferred_index=None):
                         for other in cameras:
                             if other["index"] != chosen_idx:
                                 other["cap"].release()
-                        return cam["cap"], cam["index"]
+                        return cam["cap"], cam["index"], resolution
         except (ValueError, EOFError):
             pass
         
@@ -107,7 +149,7 @@ def find_stereo_camera(preferred_index=None):
         for cam in cameras:
             cam["cap"].release()
     
-    return None, -1
+    return None, -1, None
 
 
 def test_camera(cap, camera_index):
@@ -180,7 +222,7 @@ def test_camera(cap, camera_index):
 
 
 def main():
-    cap, index = find_stereo_camera()
+    cap, index, resolution = find_stereo_camera()
     
     if cap is None:
         print("\n❌ Стереокамера не найдена!")

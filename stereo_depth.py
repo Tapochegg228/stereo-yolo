@@ -267,8 +267,8 @@ class StereoDepthEstimator:
         # Kalman-фильтр трекер
         self.tracker = MarkerTracker(
             max_distance_px=100,
-            process_noise=0.5,
-            measurement_noise=10.0
+            process_noise=5.0,
+            measurement_noise=1.0
         )
         
         # Temporal consistency для stereo_yolo matching
@@ -903,7 +903,7 @@ class StereoDepthEstimator:
                 result = {**det, **depth_info}
                 results.append(result)
         
-        # Применяем Kalman-фильтр
-        results = self.tracker.update(results)
+        # Kalman-фильтр отключён для теста лага
+        # results = self.tracker.update(results)
         
         return results
