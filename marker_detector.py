@@ -15,7 +15,7 @@ from ultralytics import YOLO
 class MarkerDetector:
     """Детектор светоотражающих маркеров на базе YOLOv8."""
     
-    def __init__(self, model_path="best.pt", confidence=0.5, device=None, imgsz=640):
+    def __init__(self, model_path="best_yolo11.pt", confidence=0.5, device=None, imgsz=640):
         """
         Args:
             model_path: Путь к обученной модели YOLOv8

@@ -90,7 +90,7 @@ class ThreadedCameraCapture:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Stereo YOLO Depth Estimation")
-    parser.add_argument("--model", type=str, default="best.pt",
+    parser.add_argument("--model", type=str, default="best_yolo11.pt",
                         help="Путь к YOLOv8 модели")
     parser.add_argument("--calibration", type=str, 
                         default="calibration_data/stereo_calibration.npz",
